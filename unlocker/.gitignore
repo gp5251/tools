@@ -1,0 +1,7 @@
+# .NET build output — regenerable via `dotnet publish -c Release`
+[Bb]in/
+[Oo]bj/
+
+# Installed single-file exe at project root (the live copy the Explorer verb points to).
+# Rebuild with: dotnet publish src/Unlocker -c Release, then copy from .../publish/Unlocker.exe
+/Unlocker.exe

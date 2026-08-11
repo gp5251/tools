@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SVG Viewer</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; padding-bottom: 2rem; background: #f3f4f6; }
+      :root { --thumb-size: 50px; }
+      header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+      #header-right { margin-left: auto; display: flex; align-items: center; gap: 1rem; flex-shrink: 0; }
+      #statusbar {
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+        padding: 4px 1rem; background: #e5e7eb; font-size: 0.75rem; color: #6b7280;
+        border-top: 1px solid #d1d5db;
+      }
+      body.no-folder #statusbar { display: none; }
+      #thumb-sizes, #view-modes { flex-shrink: 0; }
+      #thumb-sizes { display: flex; gap: 2px; }
+      #thumb-sizes button {
+        padding: 4px 10px; font-size: 0.75rem; background: #e5e7eb; border: none; cursor: pointer;
+      }
+      #thumb-sizes button:first-child { border-radius: 6px 0 0 6px; }
+      #thumb-sizes button:last-child { border-radius: 0 6px 6px 0; }
+      #thumb-sizes button.active { background: #2563eb; color: #fff; }
+      #view-modes { display: flex; gap: 2px; }
+      #view-modes button {
+        padding: 4px 10px; font-size: 0.75rem; background: #e5e7eb; border: none; cursor: pointer;
+      }
+      #view-modes button:first-child { border-radius: 6px 0 0 6px; }
+      #view-modes button:last-child { border-radius: 0 6px 6px 0; }
+      #view-modes button.active { background: #2563eb; color: #fff; }
+      .gallery {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, calc(var(--thumb-size) + 16px));
+        gap: 1rem;
+      }
+      .gallery.mode-list {
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 2px;
+      }
+      .gallery.mode-details {
+        grid-template-columns: 1fr;
+        gap: 0;
+      }
+      .gallery.mode-details .card {
+        display: flex; align-items: center; gap: 1rem;
+        border-radius: 0; border-bottom: 1px solid #e5e7eb; padding: 6px 8px;
+        box-shadow: none;
+      }
+      .gallery.mode-details .card:first-child { border-radius: 8px 8px 0 0; }
+      .gallery.mode-details .card:last-child { border-radius: 0 0 8px 8px; border-bottom: none; }
+      .gallery.mode-details .frame {
+        width: 32px; height: 32px; aspect-ratio: unset; flex-shrink: 0;
+        border-radius: 4px;
+      }
+      .gallery.mode-details .label { margin-top: 0; flex: 1; }
+      .gallery.mode-details .detail-mtime,
+      .gallery.mode-details .detail-size {
+        font-size: 0.75rem; color: #9ca3af; white-space: nowrap; min-width: 120px; text-align: right;
+      }
+      .gallery.mode-list .card {
+        display: flex; align-items: center; gap: 0.5rem;
+        padding: 4px 8px; border-radius: 4px; box-shadow: none;
+      }
+      .gallery.mode-list .frame {
+        width: 20px; height: 20px; aspect-ratio: unset; flex-shrink: 0;
+        border-radius: 2px;
+      }
+      .gallery.mode-list .label { margin-top: 0; flex: 1; }
+      .detail-mtime, .detail-size { display: none; }
+      .gallery.mode-details .detail-mtime,
+      .gallery.mode-details .detail-size { display: inline; }
+      .card { background: #fff; border-radius: 8px; padding: 8px; box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }
+      .frame {
+        width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+        background: #fafafa; border-radius: 4px; overflow: hidden;
+      }
+      .frame canvas { width: 100%; height: 100%; }
+      .label {
+        margin-top: 6px; font-family: monospace; font-size: 0.75rem; color: #374151;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .card.pending .frame { background: linear-gradient(100deg, #f0f0f0 40%, #e4e4e4 50%, #f0f0f0 60%); background-size: 200% 100%; animation: shimmer 1.2s infinite; }
+      @keyframes shimmer { to { background-position: -200% 0; } }
+      .card.broken .label { color: #dc2626; }
+      .card.oversized .label { color: #6b7280; }
+      .card.selected { outline: 2px solid #2563eb; outline-offset: -2px; }
+      .card.folder-card .frame {
+        font-size: 2.5rem; background: #fef3c7; border-radius: 4px;
+      }
+      .card.folder-card { cursor: pointer; }
+      .card.folder-card:hover { box-shadow: 0 2px 8px rgb(0 0 0 / 0.15); }
+      .rename-input { width: 100%; font: inherit; box-sizing: border-box; }
+      .drop-overlay {
+        position: fixed; inset: 0; z-index: 300; display: none;
+        align-items: center; justify-content: center;
+        background: rgb(37 99 235 / 0.15); border: 3px dashed #2563eb;
+        color: #1d4ed8; font-size: 1.25rem; pointer-events: none;
+      }
+      .drop-overlay.visible { display: flex; }
+      /* 空状态：只显示选择文件夹按钮 */
+      body.no-folder #thumb-sizes,
+      body.no-folder #view-modes { display: none; }
+      body.no-folder header { justify-content: center; }
+      /* 非图标模式隐藏缩略图档位 */
+      body.hide-thumb-sizes #thumb-sizes { display: none; }
+      .placeholder { color: #9ca3af; font-size: 0.875rem; }
+      .hover-preview {
+        position: fixed; z-index: 100;
+        background: #fff; border-radius: 8px; box-shadow: 0 8px 30px rgb(0 0 0 / 0.25);
+        display: none; align-items: center; justify-content: center;
+        pointer-events: none; overflow: hidden;
+      }
+      .hover-preview.visible { display: flex; }
+      .hover-preview { flex-direction: column; }
+      .hover-preview img { flex: 1; min-height: 0; object-fit: contain; }
+      .preview-name {
+        width: 100%; padding: 6px 8px; box-sizing: border-box;
+        font-size: 0.75rem; color: #374151; background: #f9fafb;
+        text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        border-top: 1px solid #e5e7eb; flex-shrink: 0;
+      }
+      #viewer {
+        position: fixed; inset: 0; z-index: 200; display: none; flex-direction: column;
+        background: #fff;
+      }
+      #viewer.visible { display: flex; }
+      #viewer header { display: flex; align-items: center; gap: 1rem; padding: 0.5rem 1rem; border-bottom: 1px solid #e5e7eb; }
+      #viewer-name { font-family: monospace; font-size: 0.875rem; color: #374151; }
+      #viewer .stage {
+        flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden;
+        background: repeating-conic-gradient(#d1d5db 0% 25%, #ffffff 0% 50%) 0 0 / 20px 20px;
+      }
+      #viewer .stage img { width: 100%; height: 100%; object-fit: contain; padding: 5%; box-sizing: border-box; }
+    </style>
+  </head>
+  <body class="no-folder">
+    <header>
+      <button id="pick">选择文件夹</button>
+      <button id="go-up" title="上一级" disabled>⬆</button>
+      <div id="view-modes">
+        <button data-mode="icons" title="图标">▦</button>
+        <button data-mode="list" title="列表">☰</button>
+        <button data-mode="details" title="详细信息">≡</button>
+      </div>
+      <div id="header-right">
+        <div id="thumb-sizes">
+          <button data-size="25">小</button>
+          <button data-size="50">中</button>
+          <button data-size="100">大</button>
+          <button data-size="150">超大</button>
+        </div>
+      </div>
+    </header>
+    <main id="gallery"></main>
+    <div id="statusbar"><p id="status"></p></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
