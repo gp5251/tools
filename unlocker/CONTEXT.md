@@ -1,6 +1,6 @@
 # Unlocker
 
-A Windows shell tool that adds two verbs to the right-click context menu — "Force Delete" (强力删除) and "Unlock" (解除占用) — for targets that are locked by other processes.
+A Windows shell tool that adds two verbs to the right-click context menu — "Force Delete" (强力删除) and "Unlock" (解除占用) — for targets that are locked by other processes. Holding Ctrl while clicking 强力删除 performs an Unattended Delete instead.
 
 ## Language
 
@@ -45,4 +45,8 @@ A process holding at least one open handle on the target, causing Normal Delete 
 The single file or folder selected in Explorer when either verb (Force Delete or Unlock) is invoked. A folder Target is processed recursively — for Force Delete, every locked file inside is walked through the Deletion Ladder; for Unlock, every file inside is scanned for handles. Escalation/confirmation dialogs are aggregated ONCE per invocation, never one dialog per file. Multi-selection is not supported.
 
 **Confirmation Gate** (确认门):
-Every Force Delete begins with a confirmation dialog stating the deletion is permanent and unrecoverable. No rung executes before the user confirms at the gate. Escalation rungs have their own additional confirmations.
+Every Force Delete begins with a confirmation dialog stating the deletion is permanent and unrecoverable. No rung executes before the user confirms at the gate. Escalation rungs have their own additional confirmations. The ONLY exception is an Unattended Delete, which skips the gate and every escalation confirmation (ADR 0005).
+
+**Unattended Delete** (无需确认删除):
+A Force Delete invoked with Ctrl held at the menu click (or `--yes` from the command line). Walks the entire Deletion Ladder with no confirmation at all — gate, Handle Release, Process Termination, and Reboot Delete all proceed without asking, because holding Ctrl IS the authorization. Only outcomes that leave items behind still surface a notice: Reboot Delete scheduled, or total failure.
+_Avoid_: silent delete, auto delete

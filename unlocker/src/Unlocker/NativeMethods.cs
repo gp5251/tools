@@ -97,6 +97,19 @@ internal static partial class NativeMethods
     [DllImport("kernel32.dll")]
     internal static extern uint GetFileType(IntPtr file);
 
+    // ---- Keyboard modifier state ----
+
+    internal const int VkControl = 0x11;
+
+    [DllImport("user32.dll")]
+    internal static extern short GetAsyncKeyState(int virtualKey);
+
+    /// <summary>
+    /// True while Ctrl is physically held. Meaningful only at startup: Explorer
+    /// launches the verb synchronously, so the key is still down from the click.
+    /// </summary>
+    internal static bool IsControlHeld() => (GetAsyncKeyState(VkControl) & 0x8000) != 0;
+
     // ---- Privileges ----
 
     internal const uint TokenAdjustPrivileges = 0x0020;

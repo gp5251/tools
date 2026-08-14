@@ -183,7 +183,9 @@ internal static class Dialogs
         {
             Caption = Caption,
             Heading = "安装 Unlocker",
-            Text = "把「强力删除」加入文件和文件夹的右键菜单？\n\n仅写入当前用户的注册表，不需要管理员权限，可随时卸载。",
+            Text = "把「强力删除」加入文件和文件夹的右键菜单？\n\n" +
+                   "按住 Ctrl 点击「强力删除」= 无需确认直接删除（占用进程会被直接结束）。\n" +
+                   "仅写入当前用户的注册表，不需要管理员权限，可随时卸载。",
             Icon = TaskDialogIcon.Information,
             Buttons = { install, TaskDialogButton.Cancel },
             DefaultButton = install,
@@ -217,7 +219,9 @@ internal static class Dialogs
         {
             Caption = Caption,
             Heading = "Unlocker 已安装",
-            Text = "在文件或文件夹上右键 → 显示更多选项 → 强力删除。\n（Shift+右键可直接打开经典菜单）",
+            Text = "在文件或文件夹上右键 → 显示更多选项 → 强力删除。\n" +
+                   "按住 Ctrl 点击「强力删除」= 无需确认直接删除（占用进程会被直接结束）。\n" +
+                   "（Shift+右键可直接打开经典菜单）",
             Icon = TaskDialogIcon.Information,
             Buttons = { uninstall, TaskDialogButton.OK },
             DefaultButton = TaskDialogButton.OK,

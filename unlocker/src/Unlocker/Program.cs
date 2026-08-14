@@ -50,6 +50,12 @@ internal static class Program
                 return elevated ? RunUnlockElevated(path, autoYes)
                                 : RelaunchElevated(path, autoYes, unlock: true);
             }
+            // Ctrl+click on 强力删除 = Unattended Delete (ADR 0005). Checked once,
+            // here: the key must still be held from the menu click, and the
+            // relaunch below carries the decision forward as --yes (the user has
+            // long released Ctrl by the time UAC clears).
+            if (!autoYes && NativeMethods.IsControlHeld())
+                autoYes = true;
             return elevated ? RunElevated(path, autoYes) : RunUnelevated(path, autoYes);
         }
         catch (Exception ex)
@@ -222,12 +228,15 @@ internal static class Program
         var scheduled = RebootScheduler.Schedule(result.Failed, out var scheduleFailed);
         if (scheduleFailed.Count == 0 && scheduled.Count > 0)
         {
-            if (!autoYes) Dialogs.Info("已安排，下次重启时删除",
+            // Shown even under --yes: items staying on disk until reboot is an
+            // outcome the user must see — a notice, not a confirmation.
+            Dialogs.Info("已安排，下次重启时删除",
                 $"共 {scheduled.Count} 个项目将在你下次开机时自动删除。\n不会立即重启。");
             return ExitOk;
         }
 
-        if (!autoYes) Dialogs.Error("无法删除", string.Join("\n", result.Errors.Take(10)));
+        // Shown even under --yes: silent failure would look like success.
+        Dialogs.Error("无法删除", string.Join("\n", result.Errors.Take(10)));
         return ExitFailed;
     }
 

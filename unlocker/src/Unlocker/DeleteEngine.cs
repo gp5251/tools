@@ -1,12 +1,35 @@
+using System.IO.Enumeration;
+
 namespace Unlocker;
 
 /// <summary>
 /// Rung 1 of the Deletion Ladder: Permanent Delete with per-entry failure
 /// collection. Junctions and symlinks are deleted as links, never followed.
 /// Read-only attributes are stripped before deletion — part of "force".
+///
+/// Speed: one enumeration pass carries each entry's attributes in the find
+/// data (no per-entry GetAttributes round-trips), and deletion runs in
+/// parallel — files and links first, then directories level by level,
+/// deepest first, so a parent is always deleted after its children.
 /// </summary>
 internal static class DeleteEngine
 {
+    /// <summary>One tree entry with the attributes captured during enumeration (zero extra syscalls).</summary>
+    private readonly record struct TreeEntry(string Path, FileAttributes Attributes, int Depth);
+
+    private static readonly EnumerationOptions EnumOptions = new()
+    {
+        AttributesToSkip = 0,        // hidden/system entries must be deleted too
+        IgnoreInaccessible = false,  // callers record (delete) or skip (unlock) failures themselves
+        RecurseSubdirectories = false, // manual recursion: per-directory failure recording, never follow reparse points
+    };
+
+    private static IEnumerable<TreeEntry> EnumerateDirectory(string dir, int depth) =>
+        new FileSystemEnumerable<TreeEntry>(
+            dir,
+            (ref FileSystemEntry e) => new TreeEntry(e.ToFullPath(), e.Attributes, depth),
+            EnumOptions);
+
     /// <summary>
     /// Every regular file under <paramref name="root"/> (or just the file itself).
     /// Used by Unlock, which must scan ALL files in the tree — not only the ones
@@ -17,23 +40,31 @@ internal static class DeleteEngine
     {
         var files = new List<string>();
         root = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (File.Exists(root))
+
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(root);
+        }
+        catch
+        {
+            return files;
+        }
+        if ((attributes & FileAttributes.Directory) == 0)
         {
             files.Add(root);
             return files;
         }
-        if (!Directory.Exists(root))
-            return files;
 
         var pending = new Stack<string>();
         pending.Push(root);
         while (pending.Count > 0)
         {
             string dir = pending.Pop();
-            IEnumerable<string> entries;
+            List<TreeEntry> entries;
             try
             {
-                entries = Directory.EnumerateFileSystemEntries(dir).ToList();
+                entries = EnumerateDirectory(dir, depth: 0).ToList();
             }
             catch
             {
@@ -41,21 +72,12 @@ internal static class DeleteEngine
             }
             foreach (var entry in entries)
             {
-                FileAttributes attributes;
-                try
-                {
-                    attributes = File.GetAttributes(entry);
-                }
-                catch
-                {
-                    continue;
-                }
-                bool isDirectory = (attributes & FileAttributes.Directory) != 0;
-                bool isReparsePoint = (attributes & FileAttributes.ReparsePoint) != 0;
+                bool isDirectory = (entry.Attributes & FileAttributes.Directory) != 0;
+                bool isReparsePoint = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
                 if (isDirectory && !isReparsePoint)
-                    pending.Push(entry);
+                    pending.Push(entry.Path);
                 else if (!isDirectory)
-                    files.Add(entry);
+                    files.Add(entry.Path);
             }
         }
         return files;
@@ -63,7 +85,12 @@ internal static class DeleteEngine
 
     internal sealed class DeleteResult
     {
-        /// <summary>Paths that could not be deleted, in depth-first post-order (children before parents).</summary>
+        /// <summary>
+        /// Paths that could not be deleted: unreadable directories first (enumeration
+        /// order), then files and directories roughly deepest-first — exact order is
+        /// nondeterministic because deletion runs in parallel. Callers that care
+        /// (RebootScheduler) re-sort themselves.
+        /// </summary>
         public List<string> Failed { get; } = new();
         /// <summary>Human-readable reasons keyed by path fragment, for reporting.</summary>
         public List<string> Errors { get; } = new();
@@ -73,77 +100,127 @@ internal static class DeleteEngine
     internal static DeleteResult DeleteTree(string root)
     {
         var result = new DeleteResult();
-        if (!File.Exists(root) && !Directory.Exists(root))
-            return result; // already gone — nothing to do
+        root = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-        DeleteEntry(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), result);
+        FileAttributes rootAttributes;
+        try
+        {
+            // GetAttributes (not File.Exists) so dangling links are seen as
+            // existing — they must be deletable too.
+            rootAttributes = File.GetAttributes(root);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return result; // already gone — nothing to do
+        }
+        catch (Exception ex)
+        {
+            Record(result, root, ex);
+            return result;
+        }
+
+        bool rootIsDirectory = (rootAttributes & FileAttributes.Directory) != 0;
+        bool rootIsReparse = (rootAttributes & FileAttributes.ReparsePoint) != 0;
+
+        // Single file, or a link (junction/symlink — removed as a link, target untouched).
+        if (!rootIsDirectory || rootIsReparse)
+        {
+            DeleteOne(new TreeEntry(root, rootAttributes, Depth: 0), result);
+            return result;
+        }
+
+        var files = new List<TreeEntry>();
+        var dirs = new List<TreeEntry>();
+        var unreadable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Collect(root, depth: 1, files, dirs, unreadable, result);
+
+        // Deletion is syscall-bound, so it parallelizes well even on one disk.
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = Math.Min(8, Environment.ProcessorCount) };
+
+        // Files and reparse-point directories (deleted as links) first.
+        Parallel.ForEach(files, parallel, entry => DeleteOne(entry, result));
+
+        // Real directories, one depth level at a time, deepest first: entries
+        // within a level are never ancestor-related, so a level parallelizes
+        // safely and the barrier between levels keeps children-before-parents.
+        foreach (var level in dirs.GroupBy(e => e.Depth).OrderByDescending(g => g.Key))
+            Parallel.ForEach(level, parallel, entry =>
+            {
+                // Enumeration failed inside Collect — already recorded; a delete
+                // attempt here would just fail again. Escalation retries elevated.
+                if (!unreadable.Contains(entry.Path))
+                    DeleteOne(entry, result);
+            });
+
+        DeleteOne(new TreeEntry(root, rootAttributes, Depth: 0), result);
         return result;
     }
 
-    private static void DeleteEntry(string path, DeleteResult result)
+    /// <summary>Classifies every entry under <paramref name="dir"/>, recursing into real directories only.</summary>
+    private static void Collect(string dir, int depth, List<TreeEntry> files, List<TreeEntry> dirs,
+        HashSet<string> unreadable, DeleteResult result)
     {
-        FileAttributes attributes;
+        List<TreeEntry> entries;
         try
         {
-            attributes = File.GetAttributes(path);
+            entries = EnumerateDirectory(dir, depth).ToList();
         }
         catch (Exception ex)
         {
-            Record(result, path, ex);
+            Record(result, dir, ex);
+            unreadable.Add(dir);
             return;
         }
 
-        bool isDirectory = (attributes & FileAttributes.Directory) != 0;
-        bool isReparsePoint = (attributes & FileAttributes.ReparsePoint) != 0;
-
-        // Junctions/symlinks are removed as links; their targets are never entered.
-        if (isDirectory && !isReparsePoint)
+        foreach (var entry in entries)
         {
-            IEnumerable<string> children;
-            try
+            bool isDirectory = (entry.Attributes & FileAttributes.Directory) != 0;
+            bool isReparsePoint = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
+            if (isDirectory && isReparsePoint)
+                files.Add(entry); // junction/symlink: deleted as a link, never followed
+            else if (isDirectory)
             {
-                children = Directory.EnumerateFileSystemEntries(path).ToList();
+                dirs.Add(entry);
+                Collect(entry.Path, depth + 1, files, dirs, unreadable, result);
             }
-            catch (Exception ex)
-            {
-                Record(result, path, ex);
-                return;
-            }
-
-            foreach (var child in children)
-                DeleteEntry(child, result);
-
-            TryStripReadOnly(path);
-            Try(result, path, () => Directory.Delete(path, recursive: false));
-        }
-        else
-        {
-            TryStripReadOnly(path);
-            Try(result, path, () => File.Delete(path));
+            else
+                files.Add(entry);
         }
     }
 
-    private static void TryStripReadOnly(string path)
+    /// <summary>
+    /// Deletes one entry. Files and file symlinks go through <see cref="File.Delete"/>;
+    /// directories AND directory links through <see cref="Directory.Delete(string, bool)"/>
+    /// (RemoveDirectory removes a junction/symlink itself, never its target).
+    /// </summary>
+    private static void DeleteOne(TreeEntry entry, DeleteResult result)
     {
+        TryStripReadOnly(entry);
         try
         {
-            var attr = File.GetAttributes(path);
-            if ((attr & FileAttributes.ReadOnly) != 0)
-                File.SetAttributes(path, attr & ~FileAttributes.ReadOnly);
-        }
-        catch { /* best effort — the delete attempt will report the real failure */ }
-    }
-
-    private static void Try(DeleteResult result, string path, Action delete)
-    {
-        try
-        {
-            delete();
+            if ((entry.Attributes & FileAttributes.Directory) != 0)
+                Directory.Delete(entry.Path, recursive: false);
+            else
+                File.Delete(entry.Path);
         }
         catch (Exception ex)
         {
-            Record(result, path, ex);
+            lock (result)
+                Record(result, entry.Path, ex);
         }
+    }
+
+    private static void TryStripReadOnly(TreeEntry entry)
+    {
+        if ((entry.Attributes & FileAttributes.ReadOnly) == 0)
+            return; // the common case costs no syscall at all
+        try
+        {
+            // Re-read: the attributes captured during enumeration may be stale.
+            var current = File.GetAttributes(entry.Path);
+            File.SetAttributes(entry.Path, current & ~FileAttributes.ReadOnly);
+        }
+        catch { /* best effort — the delete attempt will report the real failure */ }
     }
 
     private static void Record(DeleteResult result, string path, Exception ex)
