@@ -91,7 +91,14 @@ internal static class HandleFinder
     {
         internal readonly record struct HandleHit(int Pid, UIntPtr HandleValue, IntPtr ProcessHandle);
 
-        private static readonly TimeSpan ItemTimeout = TimeSpan.FromSeconds(3);
+        /// <summary>
+        /// Per-item deadline for an identity query. Measured on a 320k-handle system:
+        /// 10,760 completed queries had p99 = 0.09ms, max = 0.76ms — real queries are
+        /// sub-millisecond, so 1s is a ~1000x margin. A query that exceeds it is hung
+        /// (dead share, misbehaving filter driver) and would never answer at any
+        /// timeout; the wall time the user waits IS this timeout, so keep it tight.
+        /// </summary>
+        private static readonly TimeSpan ItemTimeout = TimeSpan.FromSeconds(1);
         private static readonly TimeSpan OverallTimeout = TimeSpan.FromSeconds(60);
 
         internal List<HandleHit> Hits { get; } = new();
@@ -236,7 +243,7 @@ internal static class HandleFinder
                 new Thread(() => Worker(slot)) { IsBackground = true }.Start();
             }
 
-            int initialWorkers = Math.Min(4, candidates.Count);
+            int initialWorkers = Math.Min(8, candidates.Count);
             for (int i = 0; i < initialWorkers; i++)
                 SpawnWorker();
 
@@ -298,8 +305,17 @@ internal static class HandleFinder
                     buffer = Marshal.AllocHGlobal(bufferSize);
                     status = NativeMethods.NtQuerySystemInformation(
                         NativeMethods.SystemExtendedHandleInformation,
-                        buffer, bufferSize, out _);
-                    bufferSize *= 2;
+                        buffer, bufferSize, out int returnLength);
+                    if (status == NativeMethods.StatusInfoLengthMismatch)
+                    {
+                        // The kernel reports the exact size it needs. Jumping straight
+                        // to it avoids doubling from 1 MiB — every retry re-walks the
+                        // whole handle table (~60ms per pass on a 320k-handle system).
+                        int exact = returnLength > bufferSize ? returnLength : bufferSize * 2;
+                        if (exact <= bufferSize || exact > (1 << 28))
+                            break; // nonsense size, or beyond the hard cap — fail below
+                        bufferSize = exact;
+                    }
                 }
                 while (status == NativeMethods.StatusInfoLengthMismatch && bufferSize <= (1 << 28));
 
